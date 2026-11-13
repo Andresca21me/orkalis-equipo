@@ -1,0 +1,722 @@
+/**
+ * DTOs y contratos compartidos front↔back.
+ *
+ * Solo tipos verdaderamente compartidos entre `api` y `web`. Cada fase agrega
+ * aquí los DTOs de los endpoints que cablea (ADR-008).
+ */
+import type { EstadoCita, EstadoSuscripcion, MetodoPago, OrigenCita, PerfilNegocio, RolUsuario, TipoProducto } from './enums';
+
+/** Negocio (tenant) en el contexto de sesión. */
+export interface NegocioSesion {
+  id: string;
+  nombre: string;
+  perfil: PerfilNegocio;
+  estadoSuscripcion: EstadoSuscripcion;
+}
+
+/** Respuesta de `GET /auth/me`: usuario + su contexto de negocio y alcance. */
+export interface SesionUsuario {
+  id: string;
+  nombre: string;
+  email: string;
+  /** Cuándo se probó que el correo es del dueño (Plan-Correo); null = sin verificar. */
+  emailVerificadoEn: string | null;
+  rol: RolUsuario;
+  negocioId: string;
+  /** null = alcance consolidado (admin/operador); lista = sucursales asignadas. */
+  sucursalIds: string[] | null;
+  /** Especialista enlazado (si el usuario es especialista con recurso de agenda). */
+  especialistaId: string | null;
+  /**
+   * Fecha de la última foto del especialista enlazado, para componer su URL.
+   * Viaja en la sesión y no en una petición aparte porque el avatar sale en la
+   * cabecera del panel desde el primer render. `null` = sin foto (inicial).
+   */
+  fotoVersion: string | null;
+  negocio: NegocioSesion;
+}
+
+/** Resumen de ganancias de un especialista en un período (FASE-10, H3). */
+export interface GananciasEspecialista {
+  desde: string;
+  hasta: string;
+  servicios: number; // nº de atenciones completadas
+  ganServicios: number; // Σ ganancia del profesional por servicios
+  comisiones: number; // Σ comisiones por venta de productos
+  total: number; // ganServicios + comisiones
+}
+
+// ── Reserva pública (FASE-03) ────────────────────────────────────────────────
+
+/** `GET /public/:sucursalId/info`. */
+export interface PublicInfo {
+  negocioId: string;
+  sucursalId: string;
+  sucursalNombre: string;
+  negocioNombre: string;
+  perfil: PerfilNegocio;
+  sucursales: { id: string; nombre: string }[];
+  /** Días laborables de la sucursal, índice 0=domingo … 6=sábado (true=abre). */
+  diasLaborables: boolean[];
+  /**
+   * Horario de atención por día (0=domingo … 6=sábado). `null` = ese día está
+   * cerrado o la sede no tiene horario definido (manda la disponibilidad de
+   * cada especialista).
+   */
+  horario: ({ apertura: string; cierre: string } | null)[];
+  /** Por servicioId, actividad por día (índice 0=domingo … 6=sábado; true=disponible). */
+  serviciosDia: Record<string, boolean[]>;
+  /** Marca del negocio (branding dinámico); null = se usan los valores por defecto. */
+  negocioDescripcion: string | null;
+  colorPrimario: string | null;
+  logoVersion: string | null;
+}
+
+/** Especialista público (para reservar). */
+export interface PublicEspecialista {
+  id: string;
+  nombre: string;
+  especialidad: string | null;
+  /** Fecha de la foto (hace de versión en la URL) o null si no tiene. */
+  fotoVersion: string | null;
+}
+
+/** Servicio público (precio como string numérico). */
+export interface PublicServicio {
+  id: string;
+  nombre: string;
+  precio: string;
+  duracionMin: number;
+  categoria: string | null;
+  /** Marcado como destacado por el administrador (respaldo de «Lo más reservado»). */
+  favorito: boolean;
+  /** Veces que se ha reservado en la sucursal (sin canceladas ni ausencias). */
+  reservas: number;
+  /**
+   * Especialistas de ESTA sucursal (activos y libres) que realizan el servicio.
+   * Con esta lista el cliente resuelve todo el filtrado por intersección: si
+   * llega vacía, nadie puede atenderlo y el servicio no se ofrece.
+   */
+  especialistaIds: string[];
+}
+
+/** Franja libre devuelta por `disponibilidad` (incluye el especialista asignado). */
+export interface FranjaPublica {
+  inicio: string; // ISO
+  fin: string; // ISO
+  especialistaId: string;
+}
+
+/** Respuesta de `retener`. */
+export interface RetencionResp {
+  retencionId: string;
+  expiraEn: string;
+}
+
+
+/** Respuesta de `confirmar`. */
+export interface ConfirmarResp {
+  citaId: string;
+  estado: EstadoCita;
+}
+
+// ── Agenda interna / Panel admin (FASE-05) ───────────────────────────────────
+
+/** Cita enriquecida para la agenda/panel del admin (`GET /citas`). */
+export interface CitaAgenda {
+  id: string;
+  sucursalId: string;
+  clienteId: string | null;
+  clienteNombre: string | null;
+  especialistaId: string;
+  especialistaNombre: string;
+  inicio: string; // ISO
+  fin: string; // ISO
+  estado: EstadoCita;
+  origen: OrigenCita;
+  precioEst: string | null;
+  servicios: { nombre: string; precio: string }[];
+  /** Ids de los servicios de la cita: permiten filtrar quién puede atenderla al reasignar. */
+  servicioIds: string[];
+  /** Cobro real (Plan-Finanzas): solo en citas completadas; null en el resto. */
+  cobro: CobroCita | null;
+}
+
+/** Resumen del panel admin (`GET /reportes/panel?fecha&sucursalId`). */
+export interface PanelResumen {
+  fecha: string; // YYYY-MM-DD (Bogotá)
+  citasHoy: number;
+  citasAyer: number;
+  ingresosEstimadosHoy: string;
+  ticketPromedioHoy: string;
+  especialistasTotal: number;
+  especialistasDisponibles: number;
+  proximaCita: { inicio: string; clienteNombre: string | null } | null;
+  /** Resumen del mes en curso (motor financiero). */
+  mes: {
+    etiqueta: string;
+    ingresos: string;
+    ganProfesionales: string;
+    ganSalon: string;
+    valorProductos: string;
+  };
+}
+
+// ── Clientes / CRM (FASE-06) ─────────────────────────────────────────────────
+
+/** Cliente enriquecido para la tarjeta del directorio (`GET /clientes`). */
+export interface ClienteCRM {
+  id: string;
+  nombre: string;
+  telefono: string | null;
+  /** ISO; usado para marcar "Nuevo este mes". */
+  creadoEn: string;
+  /** Nº de servicios completados (atenciones). */
+  numServicios: number;
+  /** Total gastado acumulado (COP). */
+  gastado: number;
+  /** ISO de la última atención, o null si nunca ha venido. */
+  ultimaVisita: string | null;
+}
+
+/** Una visita en la línea de tiempo del historial del cliente. */
+export interface VisitaCliente {
+  fecha: string; // ISO
+  servicio: string;
+  especialista: string;
+  metodoPago: MetodoPago;
+  monto: number;
+}
+
+/** Respuesta de `GET /clientes/:id/historial`. */
+export interface ClienteHistorial {
+  cliente: {
+    id: string;
+    nombre: string;
+    telefono: string | null;
+    activo: boolean;
+    creadoEn: string;
+  };
+  numServicios: number;
+  gastoAcumulado: number;
+  visitas: VisitaCliente[];
+}
+
+/** Detalle de una cita pública (gestión). */
+export interface CitaPublica {
+  id: string;
+  estado: EstadoCita;
+  inicio: string; // ISO
+  fin: string; // ISO
+  sucursalNombre: string;
+  especialistaNombre: string;
+  servicios: { nombre: string; precio: string }[];
+  total: string;
+}
+
+// ── Gestión: Equipo / Servicios / Inventario (FASE-07) ───────────────────────
+
+/** Especialista enriquecido para la pantalla de Equipo (`GET /especialistas`). */
+export interface EspecialistaEquipo {
+  id: string;
+  nombre: string;
+  especialidad: string | null;
+  disponible: boolean;
+  activo: boolean;
+  /** Sucursales asignadas (vía `especialista_sucursal`). */
+  sucursalIds: string[];
+  /**
+   * Servicios que realiza. **Lista vacía = realiza todos** (convención de
+   * `especialista_servicio`: sin restricción declarada, no hay restricción).
+   */
+  servicioIds: string[];
+  /** Fecha de la foto (hace de versión en la URL) o null si no tiene. */
+  fotoVersion: string | null;
+  /** Login enlazado (Plan-Correo E5): null = aún sin acceso al panel. */
+  usuarioId: string | null;
+  /** Celular en E.164 o null. Sin OTP: registrado = habilitado para avisos. */
+  telefono: string | null;
+  /** Fecha de registro del celular (histórico; ya no hay verificación por código). */
+  telefonoVerificadoEn: string | null;
+}
+
+/** Citas futuras pendientes de un especialista (previo a darlo de baja). */
+export interface CitasFuturasResp {
+  total: number;
+  /** Primeras citas para mostrar en el aviso (no es la lista completa). */
+  muestra: { id: string; inicio: string; clienteNombre: string | null; servicios: string[] }[];
+}
+
+/** Resultado de dar de baja resolviendo las citas futuras. */
+export interface BajaEspecialistaResp {
+  reasignadas: number;
+  canceladas: number;
+}
+
+/** Producto de inventario (`GET /inventario/productos`). Dinero como string numérico. */
+export interface ProductoInventario {
+  id: string;
+  sucursalId: string;
+  nombre: string;
+  tipo: TipoProducto;
+  cantidad: number;
+  stockMin: number;
+  costo: string;
+  precioVenta: string;
+  activo: boolean;
+}
+
+/** Resultado de liquidación por especialista (`POST /liquidaciones/{preview,generar}`). */
+export interface LiquidacionResultado {
+  especialistaId: string;
+  nombre: string;
+  bruto: number;
+  /** Parte del bruto que viene de servicios (invariante: servicios + productos = bruto). */
+  comisionServicios: number;
+  /** Parte del bruto que viene de comisiones por venta de productos. */
+  comisionProductos: number;
+  descuento: number;
+  neto: number;
+}
+
+/** Movimiento de stock para el kardex (`GET /inventario/movimientos`). */
+export interface MovimientoInventarioItem {
+  id: string;
+  productoId: string;
+  productoNombre: string;
+  tipoMov: 'entrada' | 'salida' | 'ajuste';
+  cantidad: number;
+  motivo: string | null;
+  /** Lo pagado en la compra; `null` cuando el movimiento no es una compra. */
+  costoTotal: string | null;
+  /** Stock tras el movimiento; `null` en filas anteriores a esta función. */
+  stockResultante: number | null;
+  gastoId: string | null;
+  creadoEn: string;
+}
+
+/**
+ * Una línea del historial de ventas de producto (`GET /inventario/ventas`).
+ *
+ * Unifica DOS fuentes que no se pueden fusionar en la base sin duplicar
+ * ingresos: la venta dentro de una cita (`atencion_producto`, ya contenida en
+ * `atencion.total`) y la venta directa de mostrador (`venta_producto`).
+ */
+export interface VentaProductoHistorial {
+  id: string;
+  fecha: string;
+  origen: 'cita' | 'directa';
+  citaId: string | null;
+  atencionId: string | null;
+  clienteNombre: string | null;
+  especialistaId: string | null;
+  especialistaNombre: string | null;
+  productoId: string;
+  productoNombre: string;
+  cantidad: number;
+  precioUnitario: number;
+  total: number;
+  comision: number;
+  costoUnitario: number;
+  /** Margen bruto de la línea: total − costo. La comisión se reporta aparte. */
+  margen: number;
+}
+
+/** Historial de ventas con sus totales del período (`GET /inventario/ventas`). */
+export interface HistorialVentasResp {
+  items: VentaProductoHistorial[];
+  totales: {
+    total: number;
+    comision: number;
+    costo: number;
+    margen: number;
+    unidades: number;
+  };
+}
+
+// ── Finanzas (FASE-08) ───────────────────────────────────────────────────────
+
+export type SaludFinanciera = 'sin_datos' | 'saludable' | 'ajustada' | 'en_perdida';
+
+/** Reporte financiero agregado (`GET /reportes/financiero`). */
+export interface ReporteFinanciero {
+  desde: string;
+  hasta: string;
+  ingresos: number;
+  gastos: number;
+  gananciaNeta: number;
+  margen: number; // 0..1
+  salud: SaludFinanciera;
+}
+
+/**
+ * Análisis financiero del período con desgloses y series para los gráficos
+ * (`GET /reportes/analisis`). Todo derivado de atenciones/ventas/gastos.
+ */
+export interface ReporteAnalisis {
+  desde: string;
+  hasta: string;
+  ingresosTotales: number; // facturado (servicios + productos)
+  ingresosSalon: number; // parte del negocio (servicios + ventas netas de comisión)
+  ganProfesionales: number; // parte de los profesionales (ya separada en origen)
+  ventasProducto: number; // facturado por productos
+  servicios: number; // nº de atenciones
+  gastosFijos: number;
+  gastosVariables: number;
+  egresos: number;
+  gananciaNeta: number; // ingresosSalon − egresos
+  margen: number; // 0..1
+  salud: SaludFinanciera;
+  porMetodoPago: { metodo: MetodoPago; total: number }[];
+  porServicio: { nombre: string; total: number }[];
+  porEspecialista: { nombre: string; ingresos: number }[];
+  tendencia: { etiqueta: string; total: number }[];
+}
+
+// ── Transparencia financiera por transacción (Plan-Finanzas) ─────────────────
+
+/**
+ * Resumen del cobro real embebido en la agenda (`CitaAgenda.cobro`, solo citas
+ * completadas). El ticket es lo COBRADO (servicios + productos + tarifa), no el
+ * estimado de catálogo.
+ */
+export interface CobroCita {
+  atencionId: string;
+  total: number;
+  totalServicios: number;
+  totalProductos: number;
+  /** Unidades de producto vendidas en la cita (badge "incluye productos"). */
+  numProductos: number;
+  /** Métodos usados, orden por monto desc. */
+  metodos: MetodoPago[];
+  /**
+   * Ganancia del especialista en esta cita. Viaja solo para el admin y para el
+   * PROPIO especialista; null para recepción y compañeros (D2).
+   */
+  miGanancia: number | null;
+}
+
+/** Una transacción del especialista (cita cobrada o venta directa de mostrador). */
+export interface TransaccionEspecialista {
+  tipo: 'cita' | 'venta_directa';
+  fecha: string;
+  citaId: string | null;
+  atencionId: string | null;
+  ventaId: string | null;
+  clienteNombre: string | null;
+  /** "Corte + Barba" · "Shampoo ×2". */
+  concepto: string;
+  /** Valor de los servicios (cita) o de la venta (mostrador). */
+  bruto: number;
+  /** "60%" · "Fijo $20.000" · "60% + comisión productos". */
+  reglaResumen: string;
+  /** Lo que ganó el especialista en la transacción. */
+  neto: number;
+}
+
+/** `GET /especialistas/:id/ganancias/detalle` — los agregados + sus filas. */
+export interface GananciasDetalle extends GananciasEspecialista {
+  transacciones: TransaccionEspecialista[];
+}
+
+/** `GET /finanzas/contexto-cobro` — lo que la pantalla de cobro debe saber (D9). */
+export interface ContextoCobro {
+  /** false = el pago con tarjeta está bloqueado hasta asignarla. */
+  comisionBancariaConfigurada: boolean;
+  /** % vigente (0 si no está configurada). */
+  comisionBancaria: number;
+}
+
+/** Reparto aplicado a una línea de servicio dentro de una atención. */
+export interface DesgloseServicio {
+  nombre: string;
+  /** Precio congelado al cobrar. */
+  precio: number;
+  regla: { tipo: 'porcentaje' | 'valor_fijo'; valor: number; origen: 'servicio' | 'global' };
+  /** Ganancia del profesional por esta línea (antes de la deducción admin). */
+  ganProf: number;
+  /**
+   * true en atenciones anteriores al plan de transparencia: la regla se
+   * reconstruyó con la configuración ACTUAL y puede no ser la aplicada.
+   */
+  aproximado?: boolean;
+}
+
+export interface DesgloseProducto {
+  nombre: string;
+  cantidad: number;
+  precioUnitario: number;
+  total: number;
+  /** Comisión del especialista por esta línea (congelada al cobrar). */
+  comision: number;
+}
+
+/**
+ * Desglose completo de una transacción (`GET /citas/:id/atencion`).
+ * Invariante que la UI muestra en la fila de cuadre:
+ * `totales.total = totales.ganSalon + totales.ganProf + comisionBancaria`.
+ */
+export interface DesgloseAtencion {
+  atencionId: string;
+  citaId: string;
+  fecha: string;
+  clienteNombre: string | null;
+  especialista: { id: string; nombre: string };
+  servicios: DesgloseServicio[];
+  productos: DesgloseProducto[];
+  pagos: { metodo: MetodoPago; monto: number }[];
+  /** % extra sobre servicios que paga el cliente y va al profesional. */
+  tarifaCliente: number;
+  /** Retención del salón sobre la ganancia del profesional. */
+  deduccionAdmin: number;
+  /** La absorbe el salón (D3). */
+  comisionBancaria: number;
+  totales: {
+    total: number;
+    totalServicios: number;
+    totalProductos: number;
+    ganProf: number; // incluye la comisión por productos
+    ganSalon: number;
+  };
+}
+
+/** Fila del arqueo de transacciones del admin (`GET /atenciones`). */
+export interface ArqueoFila {
+  atencionId: string;
+  citaId: string;
+  fecha: string;
+  clienteNombre: string | null;
+  especialista: { id: string; nombre: string };
+  servicios: string[];
+  numProductos: number;
+  metodos: MetodoPago[];
+  total: number;
+  ganProf: number;
+  ganSalon: number;
+}
+
+export interface ArqueoResp {
+  filas: ArqueoFila[];
+  hayMas: boolean;
+  /** Totales del RANGO completo (no de la página). */
+  totales: {
+    transacciones: number;
+    total: number;
+    totalServicios: number;
+    totalProductos: number;
+    ganProf: number;
+    ganSalon: number;
+    comisionBancaria: number;
+  };
+}
+
+/** Snapshot completo que archiva un cierre (Plan-Finanzas F6). */
+export interface CierreArchivo {
+  analisis: ReporteAnalisis;
+  liquidaciones: LiquidacionResultado[];
+}
+
+/**
+ * Cierre de período archivado (`GET /cierres`). `datosArchivados` es
+ * `CierreArchivo` en los cierres nuevos; los anteriores a Plan-Finanzas F6
+ * guardaron un `ReporteFinanciero` plano (la UI distingue por la forma).
+ */
+export interface Cierre {
+  id: string;
+  sucursalId: string | null;
+  tipo: 'quincenal' | 'mensual';
+  desde: string;
+  hasta: string;
+  datosArchivados: CierreArchivo | ReporteFinanciero;
+  creadoEn: string;
+}
+
+/** Gasto operativo (`GET /gastos`). */
+export interface Gasto {
+  id: string;
+  sucursalId: string;
+  tipo: 'fijo' | 'variable';
+  categoria: string | null;
+  monto: string;
+  /** Variables: día (Bogotá) en que se hizo el gasto. Null en fijos. */
+  fecha: string | null;
+  /** Fijos: día del mes en que se cobra, recurrente. Null en variables. */
+  diaCobro: number | null;
+  activo: boolean;
+  creadoEn: string;
+}
+
+/**
+ * Una ocurrencia de gasto dentro del período (Plan-Gastos): los fijos generan
+ * una POR MES en su día de cobro; las variables, una en su fecha.
+ */
+export interface GastoOcurrencia {
+  gastoId: string;
+  sucursalId: string;
+  tipo: 'fijo' | 'variable';
+  categoria: string | null;
+  monto: number;
+  /** Día (Bogotá, YYYY-MM-DD) en que el gasto golpea las finanzas. */
+  fecha: string;
+  diaCobro: number | null;
+  /** false = fijo ya desactivado (se muestran sus cobros pasados). */
+  activo: boolean;
+}
+
+/** Respuesta de `GET /gastos/detalle?desde&hasta&sucursalId`. */
+export interface GastosDetalle {
+  filas: GastoOcurrencia[];
+  totalFijos: number;
+  totalVariables: number;
+  total: number;
+}
+
+// ── Configuración (FASE-09) ──────────────────────────────────────────────────
+
+/** Canal lógico de cupo de mensajería (ADR-009). */
+export type CanalCupo = 'whatsapp_utility' | 'whatsapp_marketing' | 'sms' | 'email';
+
+/**
+ * Estado de cupo de un canal en el **ciclo de cobro** vigente
+ * (`GET /notificaciones/cupos`). Los cupos se recargan en el aniversario de
+ * cobro del negocio, no el día 1 del mes (Plan-Mensajeria D1).
+ */
+export interface EstadoCupo {
+  canal: CanalCupo;
+  consumo: number;
+  cupo: number;
+  restante: number;
+  dentroDeCupo: boolean;
+  /** Inicio del ciclo vigente (ISO, inclusivo). */
+  cicloInicio: string;
+  /** Fin del ciclo vigente (ISO, exclusivo). */
+  cicloFin: string;
+}
+
+/** Eventos cuyo texto puede personalizar cada negocio (FASE-04, D5). */
+export type EventoPlantilla =
+  | 'confirmacion'
+  | 'recordatorio'
+  | 'aviso'
+  | 'aviso_especialista'
+  | 'marketing';
+
+/** Canales que admiten plantilla (el OTP NO es configurable, es de plataforma). */
+export type CanalPlantilla = 'sms' | 'whatsapp';
+
+/**
+ * Variables permitidas en las plantillas. Es una **whitelist**: guardar una
+ * variable fuera de esta lista se rechaza, para que un typo no acabe enviándose
+ * al cliente como `{{fehca}}`.
+ */
+export const VARIABLES_PLANTILLA = [
+  'cliente',
+  'fecha',
+  'hora',
+  'sucursal',
+  'especialista',
+  'servicio',
+  /** Solo en `aviso_especialista`: "nueva cita", "cancelada"… */
+  'motivo',
+] as const;
+
+export type VariablePlantilla = (typeof VARIABLES_PLANTILLA)[number];
+
+/** Plantilla de un evento/canal (`GET /notificaciones/plantillas`). */
+export interface PlantillaMensaje {
+  evento: EventoPlantilla;
+  canal: CanalPlantilla;
+  /** Texto del negocio; `null` = usa el default de plataforma. */
+  contenidoSms: string | null;
+  whatsappContentSid: string | null;
+  activo: boolean;
+  /** Texto de plataforma que se usa cuando no hay personalización. */
+  porDefecto: string;
+  actualizadoEn: string | null;
+}
+
+/** Aviso persistente para el admin (`GET /notificaciones/alertas`). */
+export interface AlertaAdmin {
+  id: string;
+  tipo: string;
+  severidad: 'aviso' | 'critico' | string;
+  titulo: string;
+  detalle: string | null;
+  leidaEn: string | null;
+  creadoEn: string;
+}
+
+/** Usuario interno con acceso (`GET /usuarios`). */
+export interface UsuarioInterno {
+  id: string;
+  nombre: string;
+  email: string;
+  rol: RolUsuario;
+  activo: boolean;
+  /** Sucursales asignadas; vacío = admin (todas). */
+  sucursalIds: string[];
+}
+
+// ── Registro de mensajes (FASE-10) ───────────────────────────────────────────
+
+/** Una fila del outbox tal como la ve el admin (`GET /notificaciones/mensajes`). */
+export interface MensajeRegistro {
+  id: string;
+  canal: 'sms' | 'whatsapp' | 'email';
+  /** Canal que se quería usar, cuando hubo que degradar (p. ej. whatsapp→sms). */
+  canalPreferido: 'sms' | 'whatsapp' | 'email' | null;
+  /** Por qué se degradó de canal (auditoría; responde "¿y esto por qué salió por SMS?"). */
+  motivoFallback: string | null;
+  tipo: string;
+  estado: 'pendiente' | 'enviando' | 'enviado' | 'entregado' | 'fallido' | 'sin_cupo';
+  destino: string;
+  cuerpo: string | null;
+  error: string | null;
+  intento: number;
+  sobreCupo: boolean;
+  /** Id en el proveedor: sirve para rastrear el envío en el panel de Twilio. */
+  proveedorId: string | null;
+  citaId: string | null;
+  creadoEn: string;
+  enviadoEn: string | null;
+  entregadoEn: string | null;
+}
+
+export interface PaginaMensajes {
+  total: number;
+  pagina: number;
+  porPagina: number;
+  mensajes: MensajeRegistro[];
+}
+
+/** Conteo por estado del período (`GET /notificaciones/mensajes/resumen`). */
+export interface ResumenMensajes {
+  dias: number;
+  total: number;
+  porEstado: Record<string, number>;
+  /** Fracción 0..1 de mensajes fallidos o sin cupo. */
+  tasaFallo: number;
+}
+
+// ── Franjas de reserva (Plan-Franjas) ────────────────────────────────────────
+
+/** Atajos que ofrece la UI para `agendamiento.intervalo_franjas` (min). */
+export const INTERVALOS_FRANJA_PRESET = [10, 15, 20, 30, 60] as const;
+/** Topes del intervalo escrito a mano: por debajo la agenda es ruido, por
+ *  encima deja de ofrecer horas útiles. */
+export const INTERVALO_FRANJA_MIN = 5;
+export const INTERVALO_FRANJA_MAX = 120;
+
+/**
+ * Valida un intervalo de franjas. Devuelve el mensaje de error o `null`.
+ * ÚNICA definición de la regla: la usan la validación del servidor y la UI.
+ */
+export function validarIntervaloFranjas(valor: unknown): string | null {
+  if (typeof valor !== 'number' || !Number.isInteger(valor)) {
+    return 'El intervalo de franjas debe ser un número entero de minutos.';
+  }
+  if (valor < INTERVALO_FRANJA_MIN || valor > INTERVALO_FRANJA_MAX) {
+    return `El intervalo de franjas debe estar entre ${INTERVALO_FRANJA_MIN} y ${INTERVALO_FRANJA_MAX} minutos.`;
+  }
+  return null;
+}

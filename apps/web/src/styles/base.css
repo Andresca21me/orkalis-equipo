@@ -1,0 +1,223 @@
+/* ============================================================
+   ORKALIS — BASE LAYER
+   Sensible element defaults built on the token layer.
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  font-weight: var(--weight-regular);
+  color: var(--text-primary);
+  background: var(--surface-page);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Red de seguridad en móvil: un correo, una URL o el nombre de un negocio
+     escrito de una sola palabra no tienen espacios donde partir y se salían de
+     su tarjeta. `break-word` solo actúa cuando la palabra no cabe de ninguna
+     forma, así que no afecta al texto normal. */
+  overflow-wrap: break-word;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-display);
+  color: var(--text-primary);
+  margin: 0;
+  text-wrap: balance;
+}
+
+p { text-wrap: pretty; }
+
+code, pre, kbd, samp {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+a {
+  color: var(--text-link);
+  text-decoration: none;
+}
+a:hover { color: var(--brand-hover); }
+
+/* Universal focus treatment — always visible, never removed */
+:focus-visible {
+  outline: var(--focus-width) solid var(--focus-ring);
+  outline-offset: var(--focus-offset);
+  border-radius: var(--radius-xs);
+}
+
+/* Eyebrow / overline label */
+.eyebrow {
+  font-family: var(--font-body);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* Monospace data treatment */
+.data {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+  letter-spacing: 0;
+}
+
+::selection {
+  background: var(--brand-tint);
+  color: var(--text-primary);
+}
+
+/* Reduce motion (FASE-14, WCAG 2.3.3): red de seguridad global. Los componentes
+   con animación propia (AnimatedBackground, Reveal, botón primario) ya la
+   respetan; esto neutraliza cualquier transición/animación residual. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================
+   TRANSICIÓN DE TEMA (cambio de vertical)
+   Se activa solo mientras <html> tiene la clase `theme-anim`
+   (que el JS añade ~0.45s al cambiar de tema), así no hay coste
+   de transición permanente ni interferencia con hovers/scroll.
+   ============================================================ */
+html.theme-anim,
+html.theme-anim *,
+html.theme-anim *::before,
+html.theme-anim *::after {
+  transition:
+    background-color 0.4s ease,
+    background-image 0.4s ease,
+    border-color 0.4s ease,
+    color 0.4s ease,
+    fill 0.4s ease,
+    stroke 0.4s ease,
+    box-shadow 0.4s ease !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  html.theme-anim,
+  html.theme-anim *,
+  html.theme-anim *::before,
+  html.theme-anim *::after {
+    transition: none !important;
+  }
+}
+
+/* ============================================================
+   CHROME MÓVIL (reserva pública + panel del especialista)
+   El frame ocupa exactamente el alto del viewport y el scroll
+   es interno (ScrollArea con min-height:0), así las barras
+   inferiores (FooterBar / SpecTabBar) quedan siempre ancladas
+   y nunca las tapa el contenido. `100dvh` sigue al teclado y
+   a la barra de URL; `100vh` es el fallback para navegadores
+   sin dvh.
+   ============================================================ */
+.ork-appframe-bg,
+.ork-appframe {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+/* El fondo exterior también se fija al viewport: si fuera más alto que el
+   marco interior (p. ej. 100vh vs 100dvh en móvil), el documento scrollearía
+   ese sobrante y la barra inferior parecería "despegarse" con el scroll. */
+
+/* ── Alerta de días de prueba: versión compacta en móvil ──────────────────── */
+@media (max-width: 560px) {
+  .ork-trialbanner {
+    padding: 8px 12px !important;
+    gap: 9px !important;
+    margin-bottom: 12px !important;
+  }
+  .ork-trialbanner .ork-tb-msg {
+    font-size: var(--text-xs) !important;
+    line-height: 1.3 !important;
+  }
+  /* La frase secundaria se oculta: en pantalla pequeña basta el titular. */
+  .ork-trialbanner .ork-tb-extra { display: none; }
+}
+
+/* ── Nav interno de Configuración: barra horizontal deslizable en móvil ───────
+   En escritorio es una columna sticky; al colapsar a una sola columna se
+   convierte en una tira horizontal compacta (sigue sticky y accesible) para
+   no comerse el alto útil. ------------------------------------------------- */
+@media (max-width: 720px) {
+  .ork-confignav {
+    top: 60px !important;
+    padding: 6px !important;
+  }
+  .ork-confignav-list {
+    flex-direction: row !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 4px !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .ork-confignav-list::-webkit-scrollbar { display: none; }
+  .ork-confignav-list > button {
+    flex: 0 0 auto !important;
+    white-space: nowrap;
+  }
+}
+
+/* Pista de scroll lateral del nav de Configuración: degradados con chevron en
+   los bordes que aparecen cuando hay más secciones fuera de vista. */
+.ork-confignav-scroll { position: relative; }
+.ork-confignav-fade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 38px;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  color: var(--brand);
+  z-index: 2;
+}
+.ork-confignav-fade.left {
+  left: 0;
+  justify-content: flex-start;
+  padding-left: 2px;
+  background: linear-gradient(to right, var(--surface-card) 40%, transparent);
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+}
+.ork-confignav-fade.right {
+  right: 0;
+  justify-content: flex-end;
+  padding-right: 2px;
+  background: linear-gradient(to left, var(--surface-card) 40%, transparent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+.ork-confignav-fade.show { opacity: 1; }
+/* En escritorio el nav es una columna vertical: nunca mostramos las pistas. */
+@media (min-width: 721px) {
+  .ork-confignav-fade { display: none; }
+}
+
+/* Solo para lectores de pantalla: texto accesible que no ocupa espacio visual. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
