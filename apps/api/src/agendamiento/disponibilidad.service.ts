@@ -1,0 +1,197 @@
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { EstadoCita } from '@orkalis/shared';
+import { runInTenantTx, type DrizzleTx } from '../db/tx';
+import {
+  cita,
+  especialista,
+  especialistaSucursal,
+  retencionFranja,
+  servicio,
+} from '../db/schema';
+import type { TenantContext } from '../db/tenant-context';
+import { ConfigResolverService } from '../config-module/config-resolver.service';
+import { filtrarPorServicios, realizaServicios } from './validators/capacidades';
+import { HorarioService } from './horario.service';
+import { ventanasEfectivas } from './ventanas-efectivas';
+import { iniciosEnVentanas, type Ocupado } from './franjas.calculo';
+
+export interface Franja {
+  inicio: string; // ISO
+  fin: string; // ISO
+}
+
+/** Franja pública: incluye el especialista concreto que la atendería (para `any`). */
+export interface FranjaPublica extends Franja {
+  especialistaId: string;
+}
+
+/** Reglas de generación de franjas del negocio (Plan-Franjas), ya resueltas. */
+interface ReglasFranja {
+  paso: number;
+  bufferMin: number;
+  antelacionMin: number;
+}
+
+/** Instante UTC a partir de fecha local Bogotá (UTC-5) + minutos del día. */
+function instante(fechaIso: string, minutos: number): Date {
+  const [y, m, d] = fechaIso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 0, 0, 0) + (minutos + 5 * 60) * 60000);
+}
+
+/** Disponibilidad en tiempo real (FASE-08, RF-017): franjas libres por día. */
+@Injectable()
+export class DisponibilidadService {
+  constructor(
+    private readonly horario: HorarioService,
+    private readonly config: ConfigResolverService,
+  ) {}
+
+  /**
+   * Franjas libres para una fecha, compatibles con la duración TOTAL de los
+   * servicios elegidos. Acepta un especialista concreto o `'any'` (agrega sobre
+   * todos los especialistas activos de la sucursal y, por franja, asigna el
+   * primero disponible). Cada franja devuelve su `especialistaId` para que el
+   * front pueda retenerla sobre ese especialista concreto.
+   */
+  async franjasPublicas(
+    ctx: TenantContext,
+    sucursalId: string,
+    especialistaParam: string, // uuid del especialista o 'any'
+    servicioIds: string[],
+    fechaIso: string,
+  ): Promise<FranjaPublica[]> {
+    // Reglas del negocio, UNA vez por petición (no por especialista).
+    const [paso, bufferMin, antelacionMin] = await Promise.all([
+      this.config.resolverNumero(ctx.negocioId, sucursalId, 'agendamiento.intervalo_franjas'),
+      this.config.resolverNumero(ctx.negocioId, sucursalId, 'agendamiento.buffer_min'),
+      this.config.resolverNumero(ctx.negocioId, sucursalId, 'agendamiento.antelacion_reserva_min'),
+    ]);
+    const reglas: ReglasFranja = { paso, bufferMin, antelacionMin };
+    return runInTenantTx(ctx, async (tx) => {
+      // Día cerrado por el negocio → sin franjas (el cliente no puede reservar).
+      const [y0, m0, d0] = fechaIso.split('-').map(Number);
+      const weekday = new Date(Date.UTC(y0, m0 - 1, d0)).getUTCDay();
+      if (!(await this.horario.esDiaLaborable(tx, sucursalId, weekday))) return [];
+      // Si algún servicio elegido está desactivado ese día → no se puede reservar el combo.
+      const inactivos = await this.horario.serviciosInactivosEnDia(tx, weekday, servicioIds);
+      if (inactivos.size > 0) return [];
+
+      // Duración total = suma de los servicios elegidos.
+      const servs = await tx
+        .select({ id: servicio.id, dur: servicio.duracionMin })
+        .from(servicio)
+        .where(inArray(servicio.id, servicioIds));
+      if (servs.length === 0 || servs.length !== new Set(servicioIds).size) {
+        throw new NotFoundException('Algún servicio no existe.');
+      }
+      const duracion = servs.reduce((a, s) => a + s.dur, 0);
+
+      // Especialistas objetivo, ya filtrados por quién realiza el combo elegido:
+      // ofrecer una franja de alguien que no puede atenderla solo produciría un
+      // rechazo al confirmar.
+      let especialistaIds: string[];
+      if (especialistaParam === 'any') {
+        const rows = await tx
+          .select({ id: especialista.id })
+          .from(especialista)
+          .innerJoin(especialistaSucursal, eq(especialistaSucursal.especialistaId, especialista.id))
+          .where(
+            and(
+              eq(especialistaSucursal.sucursalId, sucursalId),
+              eq(especialista.activo, true),
+              eq(especialista.disponible, true),
+            ),
+          );
+        especialistaIds = await filtrarPorServicios(tx, rows.map((r) => r.id), servicioIds);
+      } else {
+        // Especialista concreto que no realiza el combo: sin franjas (no es un
+        // error; el front ya no debería ofrecerlo).
+        if (!(await realizaServicios(tx, especialistaParam, servicioIds))) return [];
+        especialistaIds = [especialistaParam];
+      }
+
+      // Agrega por hora de inicio: el primer especialista libre gana la franja.
+      const porInicio = new Map<string, FranjaPublica>();
+      for (const espId of especialistaIds) {
+        const slots = await this.slotsDeEspecialista(tx, sucursalId, espId, duracion, fechaIso, reglas);
+        for (const s of slots) {
+          if (!porInicio.has(s.inicio)) porInicio.set(s.inicio, { ...s, especialistaId: espId });
+        }
+      }
+      return [...porInicio.values()].sort((a, b) => (a.inicio < b.inicio ? -1 : 1));
+    });
+  }
+
+  /** Franjas libres de UN especialista para una duración dada, en una fecha. */
+  private async slotsDeEspecialista(
+    tx: DrizzleTx,
+    sucursalId: string,
+    especialistaId: string,
+    duracion: number,
+    fechaIso: string,
+    reglas: ReglasFranja,
+  ): Promise<Franja[]> {
+    const [y, m, d] = fechaIso.split('-').map(Number);
+    const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    const diaInicio = instante(fechaIso, 0);
+    const diaFin = instante(fechaIso, 24 * 60);
+
+    // Ventanas del especialista ya cruzadas con el horario de la sede.
+    const ventanasDelDia = await ventanasEfectivas(tx, sucursalId, especialistaId, fechaIso, weekday);
+    if (ventanasDelDia.length === 0) return [];
+
+    // Ocupado: citas activas (confirmada/en_progreso) del día.
+    const citas = await tx
+      .select({ inicio: cita.inicio, fin: cita.fin, estado: cita.estado })
+      .from(cita)
+      .where(
+        and(
+          eq(cita.especialistaId, especialistaId),
+          eq(cita.sucursalId, sucursalId),
+          gte(cita.inicio, diaInicio),
+          lt(cita.inicio, diaFin),
+        ),
+      );
+    const ocupadas = citas
+      .filter((c) => c.estado === EstadoCita.Confirmada || c.estado === EstadoCita.EnProgreso)
+      .map((c) => ({ ini: c.inicio.getTime(), fin: c.fin.getTime() }));
+
+    // Ocupado: retenciones vigentes.
+    const retenciones = await tx
+      .select({
+        ini: sql<Date>`lower(${retencionFranja.rango})`,
+        fin: sql<Date>`upper(${retencionFranja.rango})`,
+      })
+      .from(retencionFranja)
+      .where(
+        and(
+          eq(retencionFranja.especialistaId, especialistaId),
+          eq(retencionFranja.sucursalId, sucursalId),
+          sql`${retencionFranja.expiraEn} > now()`,
+        ),
+      );
+    for (const r of retenciones) {
+      ocupadas.push({ ini: new Date(r.ini).getTime(), fin: new Date(r.fin).getTime() });
+    }
+
+    // A minutos del día: el motor puro trabaja en la misma unidad que las
+    // ventanas. Ocupados de otro día (p. ej. una retención vieja) caen fuera
+    // de las ventanas y no afectan.
+    const base = diaInicio.getTime();
+    const ocupados: Ocupado[] = ocupadas.map((o) => ({
+      ini: Math.floor((o.ini - base) / 60000),
+      fin: Math.ceil((o.fin - base) / 60000),
+    }));
+
+    const inicios = iniciosEnVentanas(ventanasDelDia, ocupados, duracion, reglas.paso, reglas.bufferMin);
+    const corte = Date.now() + reglas.antelacionMin * 60000; // solo futuro + antelación
+    const libres: Franja[] = [];
+    for (const t of inicios) {
+      const ini = instante(fechaIso, t);
+      if (ini.getTime() <= corte) continue;
+      libres.push({ inicio: ini.toISOString(), fin: instante(fechaIso, t + duracion).toISOString() });
+    }
+    return libres;
+  }
+}
