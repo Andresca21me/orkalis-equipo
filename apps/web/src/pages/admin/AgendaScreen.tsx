@@ -1,0 +1,225 @@
+import { useState } from 'react';
+import type { CitaAgenda } from '@orkalis/shared';
+import { api } from '../../lib/api';
+import { useApi } from '../../lib/useApi';
+import { useSucursal } from '../../lib/sucursal';
+import { accionCita, rangoDiaBogota, useCitas, type EventoCita } from '../../lib/useCitas';
+import { fechaDesdeISO, hoyISO, money, sumarDiasISO } from '../../lib/format';
+import { Button, Card, EmptyState, ErrorState, EstadoBadge, Icon, PageHead, Spinner, Tabs } from '../../ui';
+import { AppointmentRow, CobroModal, DayCounters, MiniCalendar, NuevaCitaModal, colorDe, horaCorta } from './agenda-ui';
+import { DesgloseDialog } from './DesgloseDialog';
+import { useToast } from '../../ui';
+
+interface Especialista { id: string; nombre: string; especialidad: string | null; activo: boolean }
+
+export function AgendaScreen() {
+  const { consolidado, sucursalActivaId, sucursalActiva } = useSucursal();
+  const toast = useToast();
+  const [tab, setTab] = useState('agenda');
+  const [dia, setDia] = useState(hoyISO());
+  const [cobro, setCobro] = useState<CitaAgenda | null>(null);
+  // Arqueo de una transacción concreta (Plan-Finanzas F3).
+  const [desglose, setDesglose] = useState<string | null>(null);
+  const [nueva, setNueva] = useState(false);
+  const [espFiltro, setEspFiltro] = useState<string | null>(null);
+  const [verAntiguos, setVerAntiguos] = useState(false);
+
+  const { desde, hasta } = rangoDiaBogota(dia);
+  const citas = useCitas({ desde, hasta, sucursalId: sucursalActivaId });
+  const equipo = useApi<Especialista[]>(() => api.get('/especialistas'), []);
+
+  // Historial: últimos 60 días hasta ayer.
+  const histRango = { desde: rangoDiaBogota(sumarDiasISO(hoyISO(), -60)).desde, hasta: rangoDiaBogota(hoyISO()).desde };
+  const historial = useCitas({ desde: histRango.desde, hasta: histRango.hasta, sucursalId: sucursalActivaId });
+
+  const scope = consolidado ? 'Todo el negocio' : (sucursalActiva?.nombre ?? 'Sucursal');
+  const lista = (citas.data ?? []).filter((c) => !espFiltro || c.especialistaId === espFiltro);
+  const espFiltrado = espFiltro ? (equipo.data ?? []).find((s) => s.id === espFiltro) : null;
+  // `/especialistas` trae también los dados de baja: el listado principal solo
+  // muestra vigentes; los antiguos quedan en un desplegable discreto para poder
+  // consultar sus citas históricas sin estorbar en el día a día.
+  const vigentes = (equipo.data ?? []).filter((s) => s.activo);
+  const antiguos = (equipo.data ?? []).filter((s) => !s.activo);
+
+  function refrescar() {
+    void citas.recargar();
+  }
+  async function accion(c: CitaAgenda, ev: EventoCita) {
+    try {
+      await accionCita(c.id, ev);
+      toast('Cita actualizada', 'success');
+      refrescar();
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  }
+
+  return (
+    <div>
+      <PageHead
+        title="Agenda"
+        desc="Gestiona las citas de la sucursal y consulta el historial."
+        action={<Button iconLeft="plus" onClick={() => setNueva(true)}>Nueva cita</Button>}
+      />
+
+      <div style={{ marginBottom: 22 }}>
+        <Tabs tabs={[{ value: 'agenda', label: 'Agenda' }, { value: 'historial', label: 'Historial' }]} value={tab} onChange={setTab} />
+      </div>
+
+      {tab === 'agenda' ? (
+        <div className="ork-agenda-body">
+          <div className="ork-aside" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <MiniCalendar selectedIso={dia} onPick={setDia} />
+            <Card padding={16}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <span className="eyebrow">Especialistas</span>
+                {espFiltro && (
+                  <button type="button" onClick={() => setEspFiltro(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--brand)' }}>
+                    Ver todos
+                  </button>
+                )}
+              </div>
+              {equipo.cargando ? (
+                <Spinner size={18} />
+              ) : (
+                <>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {vigentes.map((s) => <FilaEspecialista key={s.id} esp={s} activo={espFiltro === s.id} onToggle={() => setEspFiltro((cur) => (cur === s.id ? null : s.id))} />)}
+                  </div>
+                  {antiguos.length > 0 && (
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border-subtle)' }}>
+                      <button
+                        type="button"
+                        onClick={() => setVerAntiguos((v) => !v)}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6, border: 'none', background: 'none', cursor: 'pointer', padding: 0, fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--text-tertiary)' }}
+                      >
+                        <Icon name={verAntiguos ? 'chevron-down' : 'chevron-right'} size={13} />
+                        Antiguos ({antiguos.length})
+                      </button>
+                      {verAntiguos && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8, opacity: 0.75 }}>
+                          {antiguos.map((s) => <FilaEspecialista key={s.id} esp={s} activo={espFiltro === s.id} onToggle={() => setEspFiltro((cur) => (cur === s.id ? null : s.id))} />)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </Card>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+              <h2 style={{ fontSize: 'var(--text-lg)', letterSpacing: '-0.02em', textTransform: 'capitalize', margin: 0 }}>{fechaDesdeISO(dia)}</h2>
+              {espFiltrado && <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)' }}>· solo {espFiltrado.nombre}</span>}
+            </div>
+
+            {citas.error ? (
+              <ErrorState onRetry={citas.recargar} />
+            ) : (
+              <>
+                <DayCounters citas={lista} />
+                {citas.cargando ? (
+                  <div style={{ display: 'grid', placeItems: 'center', padding: 40 }}><Spinner /></div>
+                ) : lista.length === 0 ? (
+                  <Card padding={0}>
+                    {espFiltrado ? (
+                      <EmptyState icon="calendar-x" title={`${espFiltrado.nombre} no tiene citas este día`} desc="Prueba con otro día o quita el filtro para ver toda la agenda." action={<Button variant="secondary" onClick={() => setEspFiltro(null)}>Ver todos los especialistas</Button>} />
+                    ) : (
+                      <EmptyState icon="calendar-x" title="No hay citas para este día" desc="Cuando agendes una cita aparecerá aquí, ordenada por hora." action={<Button iconLeft="plus" onClick={() => setNueva(true)}>Nueva cita</Button>} />
+                    )}
+                  </Card>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {lista.map((c) => (
+                      <AppointmentRow key={c.id} appt={c} showPrice onAccion={(ev) => void accion(c, ev)} onCobrar={() => setCobro(c)} onRevertido={() => { toast("Cobro revertido", "info"); refrescar(); }} onDesglose={() => setDesglose(c.id)} />
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div style={{ maxWidth: 980 }}>
+          <Card padding={0}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '16px 18px', borderBottom: '1px solid var(--border-subtle)' }}>
+              <Icon name="file-text" size={18} color="var(--text-tertiary)" />
+              <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 'var(--text-base)' }}>Historial</span>
+              <span style={{ minWidth: 0, fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>Últimos 60 días · {scope}</span>
+            </div>
+            <div style={{ padding: '4px 18px 14px' }}>
+              {historial.cargando ? (
+                <div style={{ display: 'grid', placeItems: 'center', padding: 40 }}><Spinner /></div>
+              ) : historial.error ? (
+                <ErrorState onRetry={historial.recargar} />
+              ) : (historial.data ?? []).length === 0 ? (
+                <EmptyState icon="file-text" title="Sin historial" desc="Las citas pasadas aparecerán aquí." compact />
+              ) : (
+                <ArchiveTable rows={historial.data ?? []} onDesglose={setDesglose} />
+              )}
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {cobro && <CobroModal cita={cobro} onClose={() => setCobro(null)} onDone={() => { setCobro(null); toast('Turno completado · ganancias calculadas', 'success'); refrescar(); }} />}
+      {desglose && <DesgloseDialog citaId={desglose} onClose={() => setDesglose(null)} />}
+      {nueva && <NuevaCitaModal sucursalId={sucursalActivaId} fechaIso={dia} onClose={() => setNueva(false)} onDone={() => { setNueva(false); toast('Cita creada', 'success'); refrescar(); }} />}
+    </div>
+  );
+}
+
+function FilaEspecialista({ esp, activo, onToggle }: { esp: Especialista; activo: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      title={activo ? 'Quitar filtro' : `Ver solo las citas de ${esp.nombre}`}
+      onClick={onToggle}
+      style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '7px 8px', margin: '0 -8px', boxSizing: 'content-box', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left', background: activo ? 'var(--brand-tint)' : 'transparent', fontFamily: 'var(--font-body)' }}
+    >
+      <span style={{ width: 10, height: 10, borderRadius: 3, background: colorDe(esp.id), flex: 'none' }} />
+      <span style={{ fontSize: 'var(--text-sm)', fontWeight: activo ? 600 : 400, color: activo ? 'var(--brand)' : 'var(--text-primary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{esp.nombre}</span>
+      {activo ? <Icon name="check" size={14} color="var(--brand)" /> : esp.especialidad && <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>{esp.especialidad}</span>}
+    </button>
+  );
+}
+
+function ArchiveTable({ rows, onDesglose }: { rows: CitaAgenda[]; onDesglose: (citaId: string) => void }) {
+  const th: React.CSSProperties = { textAlign: 'left', padding: '10px 12px', fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap' };
+  const td: React.CSSProperties = { padding: '12px', fontSize: 'var(--text-sm)', color: 'var(--text-primary)', borderTop: '1px solid var(--border-subtle)' };
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 680 }}>
+        <thead>
+          <tr>
+            <th style={th}>Fecha</th><th style={th}>Hora</th><th style={th}>Cliente</th><th style={th}>Servicios</th><th style={th}>Especialista</th><th style={{ ...th, textAlign: 'right' }}>Total</th><th style={{ ...th, textAlign: 'right' }}>Estado</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((a, i) => (
+            <tr key={a.id} style={{ background: i % 2 ? 'var(--gray-50)' : 'transparent' }}>
+              <td style={td}>{fechaDesdeISO(a.inicio.slice(0, 10))}</td>
+              <td style={td}><span className="data" style={{ fontWeight: 600 }}>{horaCorta(a.inicio)}</span></td>
+              <td style={td}>{a.clienteNombre ?? '—'}</td>
+              <td style={{ ...td, color: 'var(--text-secondary)' }}>{a.servicios.map((s) => s.nombre).join(' · ') || '—'}</td>
+              <td style={td}><span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}><span style={{ width: 7, height: 7, borderRadius: 99, background: colorDe(a.especialistaId) }} />{a.especialistaNombre}</span></td>
+              <td style={{ ...td, textAlign: 'right' }}>
+                {/* Ticket REAL en completadas (incluye productos); estimado en el resto. */}
+                {a.cobro ? (
+                  <button type="button" title="Ver desglose de la transacción" onClick={() => onDesglose(a.id)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    {a.cobro.numProductos > 0 && <Icon name="package" size={13} color="var(--text-tertiary)" />}
+                    <span className="data" style={{ fontWeight: 600, color: 'var(--brand)', textDecoration: 'underline', textDecorationColor: 'var(--border-strong)', textUnderlineOffset: 3 }}>{money(a.cobro.total)}</span>
+                  </button>
+                ) : (
+                  <span className="data" style={{ fontWeight: 600 }}>{money(a.servicios.reduce((x, s) => x + Number(s.precio), 0) || Number(a.precioEst ?? 0))}</span>
+                )}
+              </td>
+              <td style={{ ...td, textAlign: 'right' }}><EstadoBadge estado={a.estado} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
